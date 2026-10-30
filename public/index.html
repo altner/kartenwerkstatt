@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kartenwerkstatt</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Chat -->
+  <aside id="chat">
+    <header>
+      <h1>Kartenwerkstatt</h1>
+      <p>Frag in normaler Sprache nach Erreichbarkeit, Grünflächen, Haltestellen, Schulen …</p>
+    </header>
+    <div id="messages" aria-live="polite"></div>
+    <div id="chips"></div>
+    <form id="chat-form">
+      <div id="pick-chip" hidden><span id="pick-text"></span><button type="button" id="pick-clear" title="Markierung entfernen">×</button></div>
+      <div class="row">
+        <textarea id="chat-input" rows="2" placeholder="z. B. 15-Minuten-Fußweg um Deventer, Niederlande"></textarea>
+        <button id="send" type="submit">Senden</button>
+      </div>
+      <small class="hint">Tipp: Klicke in die Karte, um einen Punkt für die nächste Frage zu markieren.</small>
+    </form>
+  </aside>
+
+  <!-- Karte -->
+  <main id="mapwrap">
+    <div id="map"></div>
+    <div id="frame" hidden><span>Exportausschnitt <button id="frame-close" type="button" title="Rahmen ausblenden (Esc)" aria-label="Rahmen ausblenden">×</button></span></div>
+    <div id="map-tools">
+      <label>Basiskarte
+        <select id="basemap">
+          <option value="light">Hell (OpenFreeMap)</option>
+          <option value="osm">OpenStreetMap</option>
+          <option value="dark">Dunkel (OpenFreeMap)</option>
+          <option value="none">Ohne (weiß)</option>
+        </select>
+      </label>
+    </div>
+  </main>
+
+  <!-- Seitenleiste -->
+  <aside id="side">
+    <nav id="tabs" role="tablist">
+      <button role="tab" data-tab="layers" class="active">Ebenen</button>
+      <button role="tab" data-tab="export">Export</button>
+      <button role="tab" data-tab="style">Stylisieren</button>
+    </nav>
+
+    <section id="tab-layers" class="panel active">
+      <div id="layers-empty" class="empty">Noch keine Ebenen. Starte mit einer Frage im Chat.</div>
+      <div id="layers"></div>
+    </section>
+
+    <section id="tab-export" class="panel">
+      <h2>Basiskarte exportieren</h2>
+      <p class="hint">Der Rahmen auf der Karte ist der Ausschnitt. Maßstab und Seitenformat werden in die Datei eingebaut, damit die Karte maßstabsgetreu bleibt.</p>
+      <label>Titel <input id="ex-title" type="text" placeholder="z. B. Grünflächen im 15-Minuten-Fußweg"></label>
+      <div class="two">
+        <label>Format
+          <select id="ex-format"><option value="A4">A4</option><option value="A3" selected>A3</option><option value="A2">A2</option></select>
+        </label>
+        <label>Ausrichtung
+          <select id="ex-orient"><option value="landscape">Quer</option><option value="portrait">Hoch</option></select>
+        </label>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="ex-legend" checked> Legende</label>
+        <label><input type="checkbox" id="ex-scale" checked> Maßstabsleiste</label>
+        <label><input type="checkbox" id="ex-north" checked> Nordpfeil</label>
+        <label><input type="checkbox" id="ex-credit" checked> Quellenhinweis</label>
+      </div>
+      <div class="btns">
+        <button id="ex-download" class="primary">PNG herunterladen</button>
+        <button id="ex-preview">Vorschau</button>
+      </div>
+      <img id="ex-img" alt="" hidden>
+    </section>
+
+    <section id="tab-style" class="panel">
+      <div id="st-mode" class="seg" role="tablist">
+        <button data-mode="restyle" class="active">Karte umstylen</button>
+        <button data-mode="illu">Illustrierte Stadtkarte</button>
+      </div>
+
+      <div id="st-restyle">
+        <h2>Mit Bildmodell stylisieren</h2>
+        <p class="hint">Rendert den aktuellen Exportausschnitt mit Gemini (Nano Banana) in einem anderen Stil, die Daten sollen dabei unverändert bleiben.</p>
+        <label>Stil-Vorlage <select id="st-preset"></select></label>
+        <label>Beibehalten <textarea id="st-preserve" rows="3"></textarea></label>
+        <label>Stil <textarea id="st-style" rows="3"></textarea></label>
+        <label>Inhalte und Daten <textarea id="st-data" rows="3"></textarea></label>
+        <button id="st-fill" class="link">Aus Ebenen übernehmen</button>
+        <label>Platzierung <textarea id="st-layout" rows="2"></textarea></label>
+        <div class="btns">
+          <button id="st-run" class="primary">Rendern</button>
+          <button id="st-copy">Prompt kopieren</button>
+        </div>
+      </div>
+
+      <div id="st-illu" hidden>
+        <h2>Illustrierte Stadtkarte</h2>
+        <p class="hint">Zeichnet den Ausschnitt als illustrierte Karte. Straßen, Wasser und Grün kommen aus OSM, benannte Punkte aus deinen Ebenen werden zu kleinen Zeichnungen. Nummern, Legende und Titel setzt die App danach selbst, damit die Namen stimmen.</p>
+        <label>Titel <input id="il-title" type="text" placeholder="z. B. Deventer – Altstadt"></label>
+        <label>Stil-Vorlage <select id="il-preset"></select></label>
+        <label>Stil <textarea id="il-style" rows="3"></textarea></label>
+        <div class="checks">
+          <label><input type="checkbox" id="il-labels" checked> Nummern und Legende</label>
+          <label title="Fotos der Wahrzeichen aus Wikidata/Wikimedia Commons als Vorlage mitschicken"><input type="checkbox" id="il-refs" checked> Referenzfotos (Wikidata)</label>
+        </div>
+        <div id="il-pois" class="poi-list"></div>
+        <div class="btns">
+          <button id="il-run" class="primary">Stadtkarte zeichnen</button>
+          <button id="il-copy">Prompt kopieren</button>
+        </div>
+      </div>
+
+      <div id="st-status" class="hint"></div>
+      <img id="st-img" alt="" hidden>
+      <a id="st-download" class="btn-link" hidden download="karte-stylisiert.png">Ergebnis herunterladen</a>
+      <p class="warn">Bildmodelle können Beschriftungen, Nummern und Lagen verfälschen. Das Ergebnis immer gegen die Originalkarte prüfen.</p>
+    </section>
+  </aside>
+</div>
+
+<dialog id="table-dialog">
+  <header><strong id="table-title"></strong><span id="table-info"></span>
+    <button id="table-csv">CSV</button><button id="table-close">Schließen</button></header>
+  <div id="table-body"></div>
+</dialog>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

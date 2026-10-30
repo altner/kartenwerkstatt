@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 200" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <rect width="960" height="200" fill="#ffffff"/>
+  <defs>
+    <marker id="pfeil" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#98a2b3"/>
+    </marker>
+  </defs>
+
+  <g font-size="15" font-weight="600" fill="#1c2230">
+    <rect x="20" y="50" width="190" height="100" rx="12" fill="#eef2ff" stroke="#1d4ed8"/>
+    <text x="115" y="88" text-anchor="middle">1 · Fragen</text>
+    <text x="115" y="112" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">Chat mit Claude</text>
+    <text x="115" y="130" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">„15 Min. zu Fuß um …“</text>
+
+    <rect x="260" y="50" width="190" height="100" rx="12" fill="#ecfdf3" stroke="#16a34a"/>
+    <text x="355" y="88" text-anchor="middle">2 · Analysieren</text>
+    <text x="355" y="112" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">Ebenen aus OSM</text>
+    <text x="355" y="130" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">Isochronen, POIs, Puffer</text>
+
+    <rect x="500" y="50" width="190" height="100" rx="12" fill="#fffaeb" stroke="#d97706"/>
+    <text x="595" y="88" text-anchor="middle">3 · Exportieren</text>
+    <text x="595" y="112" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">PNG A4–A2, bis 300 dpi</text>
+    <text x="595" y="130" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">Maßstab, Legende, Nordpfeil</text>
+
+    <rect x="740" y="20" width="200" height="72" rx="12" fill="#fdf2fa" stroke="#db2777"/>
+    <text x="840" y="50" text-anchor="middle">4a · Umstylen</text>
+    <text x="840" y="72" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">Gemini, Daten bleiben</text>
+
+    <rect x="740" y="108" width="200" height="72" rx="12" fill="#fdf2fa" stroke="#db2777"/>
+    <text x="840" y="138" text-anchor="middle">4b · Stadtkarte</text>
+    <text x="840" y="160" text-anchor="middle" font-size="12" font-weight="400" fill="#475467">illustriert, mit Legende</text>
+  </g>
+
+  <g stroke="#98a2b3" stroke-width="2" fill="none" marker-end="url(#pfeil)">
+    <path d="M210 100 H254"/>
+    <path d="M450 100 H494"/>
+    <path d="M690 90 L734 62"/>
+    <path d="M690 110 L734 138"/>
+  </g>
+</svg>
