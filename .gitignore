@@ -1,2 +1,20 @@
-node_modules
+# Abhängigkeiten
+node_modules/
+
+# Zugangsdaten (nur die Vorlage wird versioniert)
 .env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Betriebssystem und Editoren
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Testabdeckung
+coverage/

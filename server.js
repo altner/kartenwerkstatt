@@ -38,13 +38,13 @@ export function createApp({ anthropic, sessions = new Map() } = {}) {
   async function imageModelCaps(id) {
     const hit = capsCache.get(id);
     if (hit && Date.now() - hit.at < 3600e3) return hit.caps;
-    let caps = { maxReferences: 3 };
+    let caps = { maxReferences: 3, resolutions: [] };
     try {
       const r = await fetch('https://openrouter.ai/api/v1/images/models');
-      const m = (await r.json()).data?.find((x) => x.id === id);
-      const max = m?.supported_parameters?.input_references?.max;
-      if (Number.isInteger(max)) caps = { maxReferences: max };
-    } catch { /* Standardwert behalten */ }
+      const sp = (await r.json()).data?.find((x) => x.id === id)?.supported_parameters;
+      const max = sp?.input_references?.max;
+      caps = { maxReferences: Number.isInteger(max) ? max : 3, resolutions: sp?.resolution?.values || [] };
+    } catch { /* Standardwerte behalten */ }
     capsCache.set(id, { at: Date.now(), caps });
     return caps;
   }
@@ -56,7 +56,7 @@ export function createApp({ anthropic, sessions = new Map() } = {}) {
       stylize,
       chatModel: model(),
       imageModel: imageModel(),
-      maxReferences: stylize ? (await imageModelCaps(imageModel())).maxReferences : 0,
+      ...(stylize ? await imageModelCaps(imageModel()) : { maxReferences: 0, resolutions: [] }),
     });
   });
 
@@ -157,7 +157,7 @@ export function createApp({ anthropic, sessions = new Map() } = {}) {
   app.post('/api/stylize', async (req, res) => {
     const key = process.env.OPENROUTER_API_KEY;
     if (!key) return res.status(400).json({ error: 'OPENROUTER_API_KEY fehlt. Bitte in der Datei .env eintragen und den Server neu starten.' });
-    const { image, prompt, aspect_ratio, references = [] } = req.body || {};
+    const { image, prompt, aspect_ratio, references = [], resolution } = req.body || {};
     const IMG = /^data:image\/\w+;base64,.+$/;
     if (!IMG.test(image || '') || !prompt) return res.status(400).json({ error: 'Bild (Data-URL) und Prompt sind erforderlich.' });
     if (!Array.isArray(references) || references.length > 13 || !references.every((r) => IMG.test(r))) return res.status(400).json({ error: 'Referenzbilder müssen Data-URLs sein (max. 13).' });
@@ -174,6 +174,8 @@ export function createApp({ anthropic, sessions = new Map() } = {}) {
           input_references: [image, ...references].map((url) => ({ type: 'image_url', image_url: { url } })),
           // Seitenverhältnis des (aufgefüllten) Ausschnitts, damit das Modell nicht auf ein anderes Format ausweicht
           ...(/^\d{1,2}:\d{1,2}$/.test(aspect_ratio || '') && { aspect_ratio }),
+          // Auflösung (z. B. 2K für lesbare Schrift), nur wenn das Modell sie unterstützt; der Browser fragt das über /api/config ab
+          ...(/^(512|1K|2K|4K)$/.test(resolution || '') && { resolution }),
         }),
       });
       const data = await r.json().catch(() => ({}));

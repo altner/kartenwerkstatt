@@ -1,9 +1,9 @@
-// Tests ohne Netzwerk: Nominatim, Valhalla, Overpass, OpenRouter und Claude werden gemockt.
+// Tests ohne Netzwerk: Nominatim, Valhalla, Overpass, Wikidata/Commons, OpenRouter und Claude werden gemockt.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as turf from '@turf/turf';
 import { createSession, runTool, newChanges } from '../lib/tools.js';
-import { buildOverpassQuery } from '../lib/geo.js';
+import { buildOverpassQuery, overpassToFeatures } from '../lib/geo.js';
 import { createApp } from '../server.js';
 
 const realFetch = globalThis.fetch;
@@ -33,12 +33,32 @@ function mockExternal() {
         { type: 'node', id: 13, lat: 52.256, lon: 6.165, tags: { railway: 'station', name: 'Bahnhof' } },
       ] });
     }
+    if (u.includes('wikidata.org/w/api.php')) {
+      return json({ entities: {
+        Q1811227: { claims: { P18: [{ mainsnak: { datavalue: { value: 'Lebuinuskerk 2011.jpg' } } }] } },
+        Q999: { claims: {} },
+      } });
+    }
+    if (u.includes('commons.wikimedia.org/w/api.php')) {
+      return json({ query: {
+        normalized: [{ from: 'File:Lebuinuskerk 2011.jpg', to: 'File:Lebuinuskerk 2011.jpg' }],
+        pages: { 1: { title: 'File:Lebuinuskerk 2011.jpg', imageinfo: [{
+          thumburl: 'https://upload.wikimedia.org/thumb/lebuinus.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Lebuinuskerk_2011.jpg',
+          extmetadata: { Artist: { value: '<a href="#">Jane Doe</a>' }, LicenseShortName: { value: 'CC BY-SA 3.0' } },
+        }] } },
+      } });
+    }
+    if (u.includes('upload.wikimedia.org')) {
+      return new Response(Buffer.from('JPG'), { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
+    }
     if (u.includes('openrouter.ai/api/v1/images')) {
       assert.equal(opts.headers.Authorization, 'Bearer test-key');
       const body = JSON.parse(opts.body);
       assert.equal(body.model, 'google/gemini-2.5-flash-image');
       assert.equal(body.input_references[0].image_url.url, 'data:image/png;base64,QQ==');
       assert.equal(body.aspect_ratio, '3:2');
+      assert.equal(body.resolution, '2K');
+      assert.deepEqual(body.input_references.slice(1).map((r) => r.image_url.url), ['data:image/jpeg;base64,SlBH']);
       return json({ created: 1, data: [{ b64_json: 'QUJD', media_type: 'image/png' }] });
     }
     throw new Error(`Unerwarteter Aufruf: ${u}`);
@@ -147,19 +167,63 @@ test('Server: ohne Keys klare Fehlermeldungen; Stylisieren mit Key liefert Bild'
     r = await post('/api/stylize', { image: 'data:image/png;base64,QQ==', prompt: 'x' });
     assert.equal(r.status, 400);
     process.env.OPENROUTER_API_KEY = 'test-key';
-    r = await post('/api/stylize', { image: 'data:image/png;base64,QQ==', prompt: 'x', aspect_ratio: '3:2' });
+    r = await post('/api/stylize', { image: 'data:image/png;base64,QQ==', prompt: 'x', aspect_ratio: '3:2', references: ['data:image/jpeg;base64,SlBH'], resolution: '2K' });
     const d = await r.json();
     assert.equal(r.status, 200);
     assert.equal(d.image, 'data:image/png;base64,QUJD');
     assert.equal(d.model, 'google/gemini-2.5-flash-image');
     r = await post('/api/stylize', { image: 'kein-bild', prompt: 'x' });
     assert.equal(r.status, 400);
+    r = await post('/api/stylize', { image: 'data:image/png;base64,QQ==', prompt: 'x', references: ['https://example.com/x.jpg'] });
+    assert.equal(r.status, 400, 'Referenzen nur als Data-URL');
   } finally {
     server.close();
     if (saved.a) process.env.ANTHROPIC_API_KEY = saved.a;
     if (saved.o) process.env.OPENROUTER_API_KEY = saved.o; else delete process.env.OPENROUTER_API_KEY;
     if (saved.m) process.env.OPENROUTER_IMAGE_MODEL = saved.m;
   }
+});
+
+test('Referenzfotos: Wikidata-Bild → Commons-Vorschau mit Urheber und Lizenz', async () => {
+  const server = createApp().listen(0, '127.0.0.1');
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const r = await fetch(`${base}/api/references`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ qids: ['Q1811227', 'Q999', 'kein-qid'] }) });
+    const { references } = await r.json();
+    assert.equal(r.status, 200);
+    assert.deepEqual(Object.keys(references), ['Q1811227'], 'nur Einträge mit Foto');
+    assert.equal(references.Q1811227.image, 'data:image/jpeg;base64,SlBH');
+    assert.equal(references.Q1811227.artist, 'Jane Doe', 'HTML aus dem Urheber entfernt');
+    assert.equal(references.Q1811227.license, 'CC BY-SA 3.0');
+  } finally { server.close(); }
+});
+
+test('OSM-Objekte behalten gültige Wikidata-IDs', () => {
+  const feats = overpassToFeatures({ elements: [
+    { type: 'node', id: 1, lat: 52.25, lon: 6.16, tags: { amenity: 'place_of_worship', name: 'Lebuinuskerk', wikidata: 'Q1811227' } },
+    { type: 'node', id: 2, lat: 52.25, lon: 6.17, tags: { amenity: 'place_of_worship', name: 'Kapelle', wikidata: 'kaputt' } },
+  ] }, { tags: ['amenity=place_of_worship'], kind: 'point' });
+  assert.equal(feats[0].properties.wikidata, 'Q1811227');
+  assert.equal(feats[0].properties.subtype, 'Kirche/Gotteshaus');
+  assert.equal(feats[1].properties.wikidata, undefined);
+});
+
+test('Sehenswürdigkeiten behalten ihren Grundriss, große Flächen nicht', () => {
+  const ring = (x, y, d) => [[x, y], [x + d, y], [x + d, y + d], [x, y + d], [x, y]].map(([lon, lat]) => ({ lat, lon }));
+  const way = (id, d, tags) => ({ type: 'way', id, nodes: [1, 2, 3, 4, 1].map((n) => id * 10 + n), geometry: ring(6.16, 52.25, d), tags });
+  const json = { elements: [
+    way(10, 0.0005, { amenity: 'place_of_worship', name: 'Kerk' }), // ca. 34 × 55 m
+    way(11, 0.01, { tourism: 'attraction', name: 'Park' }), // ca. 0,7 km² → zu groß
+  ] };
+  const feats = overpassToFeatures(json, { tags: ['amenity=place_of_worship', 'tourism=attraction'], kind: 'point', footprints: true });
+  assert.equal(feats[0].geometry.type, 'Point');
+  assert.equal(feats[0].properties.footprint.type, 'Polygon');
+  assert.equal(feats[0].properties.footprint.coordinates[0].length, 5);
+  assert.equal(feats[1].properties.footprint, undefined);
+  const plain = overpassToFeatures(json, { tags: ['amenity=place_of_worship'], kind: 'point' });
+  assert.equal(plain[0].properties.footprint, undefined);
+  assert.match(buildOverpassQuery({ tags: ['amenity=place_of_worship'], kind: 'point', center: [6.16, 52.25], radius_m: 500, footprints: true }), /out geom tags;/);
 });
 
 test('newChanges ist leer', () => {

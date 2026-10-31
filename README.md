@@ -14,7 +14,7 @@ Die Idee stammt aus dem Workflow im Video „The Secret to Maps That Are Both Ac
 | **Ebenen** | Farbe, Deckkraft, Sichtbarkeit und Gruppenfarben je Untertyp ändern, Tabelle mit CSV-Export, Klick auf ein Objekt zeigt Details. Jede Ebene hat eine Kennung (L1, L2, …), über die man sie im Chat ansprechen kann. |
 | **Export** | PNG im Format A4, A3 oder A2 (hoch/quer) mit Titel, Maßstabsleiste, Nordpfeil, Legende und Quellenhinweis. Gerendert wird mit bis zu 300 dpi, unabhängig von der Bildschirmauflösung. |
 | **Karte umstylen** | Der Exportausschnitt geht mit einem Prompt (Beibehalten / Stil / Inhalte / Platzierung) an Gemini (Nano Banana). Die Daten sollen bleiben, nur der Look ändert sich. Fünf Stilvorlagen. |
-| **Illustrierte Stadtkarte** | Gemini zeichnet den Ausschnitt als illustrierte Karte (Aquarell, Vintage, isometrisch, Linienzeichnung). Benannte Punkte, z. B. Sehenswürdigkeiten, werden zu kleinen Zeichnungen. Nummern, Legende und Titel setzt die App selbst, damit die Namen stimmen. |
+| **Illustrierte Stadtkarte** | Gemini zeichnet den Ausschnitt als illustrierte Karte (Aquarell, Vintage, isometrisch, Linienzeichnung) in der echten Bauweise des Ortes. Benannte Punkte, z. B. Sehenswürdigkeiten, werden zu kleinen Zeichnungen, Wahrzeichen nach Fotos aus Wikidata und auf ihrem echten Grundriss aus OSM. Straßennamen, Nummern, Titel und Legende zeichnet Gemini mit („aus einem Guss“), oder die App setzt sie exakt ein. |
 
 ## Schnellstart
 
@@ -69,9 +69,20 @@ Tab **Stylisieren → Karte umstylen**: Stilvorlage wählen (Planungs-Brief, Dun
 
 1. Im Chat benannte Punkte holen, am besten Sehenswürdigkeiten.
 2. Ausschnitt einstellen. Die Liste im Tab zeigt, welche Orte drinliegen (max. 30, ohne den Standort-Marker).
-3. **Stylisieren → Illustrierte Stadtkarte**, Titel und Stil wählen, **Stadtkarte zeichnen**.
+3. **Stylisieren → Illustrierte Stadtkarte**, Titel, Ort und Stil wählen, **Stadtkarte zeichnen**.
 
-Nach etwa 20–30 Sekunden kommt die Karte mit nummerierten Orten und einer Seitenleiste mit Titel und Legende. Der Stil schwankt von Lauf zu Lauf. Zwei Durchläufe und das schönere Bild nehmen ist normal.
+Nach etwa 20–40 Sekunden kommt die Karte mit nummerierten Orten und einer Seitenleiste mit Titel und Legende. Der Stil schwankt von Lauf zu Lauf. Zwei Durchläufe und das schönere Bild nehmen ist normal.
+
+| Einstellung | Wirkung |
+|---|---|
+| **Ort** | Wird aus dem Standort im Chat vorbelegt. Gemini zeichnet Häuser und Dächer in der echten örtlichen Bauweise, in Deventer also Backstein mit Ziegeldächern, in Bangkok Thai-Architektur. |
+| **Beschriftung: aus einem Guss** | Straßennamen, Nummern, Titel und Legende stehen in der Vorlage, Gemini letert sie im Stil der Karte. Wirkt wie gezeichnet, Schreibfehler sind aber möglich, etwa eine vertauschte Nummer. Mit fähigen Modellen in 2K. Nur der Quellenhinweis kommt danach von der App, weil er exakt stimmen muss. |
+| **Beschriftung: exakt** | Gemini zeichnet ohne Text, die App setzt Straßennamen, Nummern und Legende danach darüber. Die Schreibweise stimmt garantiert, die Schrift sieht aber nach Computer aus. |
+| **Referenzfotos (Wikidata)** | Für Wahrzeichen (Kirchen, Museen, Stadttore …), die in OSM eine Wikidata-ID haben, gehen Fotos von Wikimedia Commons mit. Die Zeichnung ähnelt dann dem echten Gebäude, auch wenn es vom örtlichen Stil abweicht. Urheber und Lizenz stehen im Quellenhinweis. |
+| **Wahrzeichen genau platzieren** | Wahrzeichen mit Foto und Grundriss zeichnet Gemini in einem zweiten Schritt einzeln nach: nur der Bildausschnitt um den Grundriss geht hin, der Grundriss ist magenta umrandet, das Ergebnis kommt mit weichem Rand zurück. So steht etwa die Kirche wirklich auf ihrem Platz. Kostet je Wahrzeichen einen weiteren Aufruf (höchstens 6) und etwa 10–20 Sekunden. |
+| **Straßennamen**, **Nummern und Legende** | einzeln abschaltbar |
+
+Für diesen Modus lohnt sich ein neueres Bildmodell, siehe `OPENROUTER_IMAGE_MODEL`.
 
 ## Konfiguration
 
@@ -82,7 +93,7 @@ Alle Einstellungen stehen in `.env` (Vorlage: `.env.example`).
 | `ANTHROPIC_API_KEY` | für den Chat | Schlüssel von https://console.anthropic.com |
 | `CLAUDE_MODEL` | nein | Modell für den Chat, Standard `claude-sonnet-5-5` |
 | `OPENROUTER_API_KEY` | fürs Stylisieren | Schlüssel von https://openrouter.ai/keys |
-| `OPENROUTER_IMAGE_MODEL` | nein | Bildmodell, Standard `google/gemini-2.5-flash-image` (Nano Banana). Für höhere Auflösung und bessere Schrift ein Pro-Modell eintragen (kostet mehr). |
+| `OPENROUTER_IMAGE_MODEL` | nein | Bildmodell, Standard `google/gemini-2.5-flash-image` (Nano Banana: max. 3 Eingabebilder, ~1K). Empfohlen für die illustrierte Stadtkarte: `google/gemini-3.1-flash-image` (Nano Banana 2: 14 Eingabebilder, bis 4K, deutlich bessere Schrift). Die App liest die Fähigkeiten des Modells bei OpenRouter aus. |
 | `NOMINATIM_URL`, `VALHALLA_URL`, `OVERPASS_URL` | nein | eigene Instanzen statt der öffentlichen Dienste |
 | `PORT` | nein | Standard 3000 |
 
@@ -93,6 +104,7 @@ Fehlt ein Schlüssel, läuft die Oberfläche trotzdem. Die betroffene Funktion i
 | Zweck | Dienst | Kosten |
 |---|---|---|
 | Ortssuche | Nominatim (OSM) | frei, Rate-Limit |
+| Referenzfotos | Wikidata und Wikimedia Commons | frei, Lizenz je Foto |
 | Isochronen | Valhalla auf valhalla1.openstreetmap.de (FOSSGIS) | frei, Rate-Limit |
 | POIs, Flächen, Gebäude | Overpass API (OSM) | frei, Rate-Limit |
 | Basiskarte Hell/Dunkel | OpenFreeMap (Vektorkacheln) | frei, ohne Key |
@@ -110,7 +122,8 @@ Die öffentlichen OSM-Dienste sind für faire Nutzung gedacht. Bei intensiver Nu
 - **Abfragegrenzen:** Radius max. 5 km, Suchfläche max. 30 km Diagonale, Gebäude max. 1,5 km Radius bzw. 4 km Diagonale, max. 6000 Objekte je Ebene, Isochronen max. 4 Zeiten bis 60 Minuten.
 - **Export:** Die Browser-Zeichenfläche ist auf 8192 px begrenzt. A3 erreicht etwa 275 dpi, A2 etwa 195 dpi. Vektorkarten werden scharf, die OSM-Rasterkarte wird nur hochskaliert.
 - **Bildmodelle** verfälschen Beschriftungen, Nummern und Lagen. Stylisierte Karten immer gegen das Original prüfen. Die Maßstabsleiste gilt nur für den normalen Export. Nano Banana liefert etwa 1200 px Breite.
-- **Illustrierte Stadtkarte:** Gemini setzt nicht an jeden Punkt eine Zeichnung, und manche stehen leicht daneben.
+- **Illustrierte Stadtkarte:** Gemini setzt nicht an jeden Punkt eine Zeichnung. Kleine Wahrzeichen sitzen dank Grundriss meist richtig. Große (etwa eine Kirche) verschiebt Gemini im ersten Durchgang teils um eine Gebäudelänge, deshalb gibt es „Wahrzeichen genau platzieren“. Im Modus „aus einem Guss“ kann Gemini Namen verändern oder Nummern vertauschen. Legende und Straßennamen deshalb gegenlesen.
+- **Referenzfotos** gibt es nur für Orte, die in OSM eine Wikidata-ID mit Bild haben. Die Fotos stehen meist unter CC-Lizenzen. Bei Weitergabe der Karte den Quellenhinweis stehen lassen.
 
 ## Fehlerbehebung
 

@@ -29,6 +29,7 @@ Der Server ist zustandsbehaftet, aber ohne Datenbank: Sitzungen liegen in einer 
 |---|---|
 | `server.js` | Express-App (`createApp`), Systemprompt, Agent-Schleife, Endpoint fürs Stylisieren |
 | `lib/geo.js` | Zugriff auf Nominatim, Valhalla und Overpass, OSM-Kategorien (`CATEGORIES`), Untertyp-Namen (`SUBTYPE_LABELS`), Tag-Prüfung |
+| `lib/wiki.js` | Referenzfotos: Wikidata (P18) → Commons-Vorschaubild mit Urheber und Lizenz |
 | `lib/tools.js` | Werkzeugdefinitionen für Claude (`toolDefinitions`), deren Ausführung (`runTool`), Sitzungs- und Ebenenmodell |
 | `public/index.html` | Layout: Chat, Karte, Seitenleiste mit den Tabs Ebenen, Export und Stylisieren |
 | `public/app.js` | Gesamte Oberfläche: Karte, Basiskarten, Ebenen, Export, Stylisieren, illustrierte Stadtkarte |
@@ -41,12 +42,13 @@ Der Server ist zustandsbehaftet, aber ohne Datenbank: Sitzungen liegen in einer 
 
 | Methode und Pfad | Zweck |
 |---|---|
-| `GET /api/config` | Welche Funktionen aktiv sind (`chat`, `stylize`) und welche Modelle genutzt werden |
+| `GET /api/config` | Welche Funktionen aktiv sind (`chat`, `stylize`), welche Modelle genutzt werden und was das Bildmodell kann (`maxReferences`, `resolutions`, live von OpenRouter, 1 h zwischengespeichert) |
 | `POST /api/session` | Neue Sitzung, liefert `{ id }` |
 | `POST /api/chat` | `{ sessionId, message }` → `{ reply, upsert, remove, view }` |
 | `PATCH /api/session/:sid/layers/:lid` | Manuelle Änderungen aus der Oberfläche (Name, Farbe, Deckkraft, Sichtbarkeit, Gruppenfarben) |
 | `DELETE /api/session/:sid/layers/:lid` | Ebene entfernen |
-| `POST /api/stylize` | `{ image, prompt, aspect_ratio? }` → `{ image, model }`, leitet an OpenRouter weiter |
+| `POST /api/references` | `{ qids }` → `{ references: { Q…: { image, file, artist, license, url } } }`, Fotos als Data-URL |
+| `POST /api/stylize` | `{ image, prompt, aspect_ratio?, references?, resolution? }` → `{ image, model }`, leitet an OpenRouter weiter |
 
 Der Server lauscht nur auf `127.0.0.1`. Die Schlüssel verlassen den Server nie, der Browser sieht nur `/api/config`.
 
@@ -123,16 +125,32 @@ Gemini erzeugt nur feste Formate, und deren Pixelmaße weichen vom Namen ab („
 ### Illustrierte Stadtkarte
 
 ```
-collectPois ─▶ renderTemplate ─▶ composeIlluPrompt ─▶ stylizeCanvas ─▶ drawIlluOverlay
+collectPois ─▶ loadReferences ─▶ buildIlluInput ─▶ stylizeCanvas ─▶ (drawCredits | Straßennamen + drawIlluOverlay)
+                                  ├ renderTemplate
+                                  ├ drawIlluOverlay (nur „aus einem Guss“)
+                                  └ composeIlluPrompt
 ```
 
-1. **`collectPois`**: Punkte mit Namen aus sichtbaren Ebenen, die im Ausschnitt liegen (Standort-Marker und Doppelte ausgenommen). Sie werden in Lesereihenfolge nummeriert, damit man sie in der Legende schnell findet. Höchstens 30.
-2. **`renderTemplate`**: Zeichenvorlage aus der Vektor-Basiskarte. Beschriftungen (Symbol-Ebenen) und alle Analyse-Ebenen werden kurz ausgeblendet, die POIs kommen als rote Punkte darauf. Ist gerade keine Vektorkarte aktiv, wird kurz auf „Hell“ umgeschaltet. Danach ist alles wie vorher.
-3. **`composeIlluPrompt`**: Stil, Anweisung zur Lagetreue, je POI nur Art und Lage in Prozent, Textverbot am Anfang und am Ende.
-4. **`stylizeCanvas`**: wie oben, mit Auffüllen und Zuschneiden.
-5. **`drawIlluOverlay`**: Nummern-Badges rechts oberhalb der Orte, rechts eine Seitenleiste mit Titel, Legende „Orte“ und Quellenhinweis. Liefert ein neues, breiteres Bild.
+1. **`collectPois`**: Punkte mit Namen aus sichtbaren Ebenen, die im Ausschnitt liegen (Standort-Marker und Doppelte ausgenommen), mit Typ, Wikidata-ID und Grundriss (`poiFootprint`). Den Grundriss liefert `find_features` für Sehenswürdigkeiten aus OSM (`out geom`, Fläche bis 40 000 m², als `properties.footprint`). Fehlt er, nimmt die App für Gebäude-Typen das Gebäude der Vektorkarte, in dem der Punkt liegt. OpenFreeMap fasst Häuser zu Multipolygonen zusammen, daher zählt nur das Teilpolygon mit dem Punkt; Umrisse über 30 % des Ausschnitts werden verworfen. Sie werden in Lesereihenfolge nummeriert, damit man sie in der Legende schnell findet. Höchstens 30.
+2. **`loadReferences`**: Für Gebäude-Typen (`REF_TYPES`: Kirche, Burg, Stadttor, Museum …) mit Wikidata-ID holt `/api/references` die Fotos. Es werden höchstens so viele, wie das Modell neben der Vorlage annimmt (`maxReferences − 1`).
+3. **`grabVectorFrame`**: Rendert den Ausschnitt der Vektor-Basiskarte nur mit ausgewählten Ebenen, optional mit anderen Textfarben, und stellt danach alles wieder her. Ist gerade keine Vektorkarte aktiv, wird kurz auf „Hell“ umgeschaltet. Darauf bauen auf:
+   - **`renderTemplate`**: Straßen, Wasser, Grün und Gebäude ohne Beschriftung, optional mit Straßen- und Gewässernamen (`isNameLayer`), Grundrisse der Wahrzeichen sandfarben mit brauner Kontur, POIs ohne Grundriss als rote Punkte (nicht im Modus „aus einem Guss“ mit Nummern).
+   - **`renderNameLabels`**: nur die Namen, auf transparentem Grund, zum Darüberlegen im Modus „exakt“.
+4. **`buildIlluInput`**: Im Modus „aus einem Guss“ wird `drawIlluOverlay` schon auf die Vorlage angewendet. Nummern und Seitenleiste stehen so im Bild, das Gemini bekommt.
+5. **`composeIlluPrompt`**: Textregel je nach Modus, Stil, Lagetreue, Ort mit Anweisung zur örtlichen Bauweise, Zuordnung der Referenzfotos (Bild 2 … n), je POI Typ und Lage in Prozent, bei Wahrzeichen die Ausdehnung des Grundrisses mit der Anweisung, genau darauf zu zeichnen. Im Modus „aus einem Guss“ werden die Lagen auf die Gesamtbreite inklusive Seitenleiste umgerechnet (`mapFrac`).
+6. **`stylizeCanvas`**: wie oben, mit Referenzbildern und im Modus „aus einem Guss“ mit `resolution: '2K'`, wenn das Modell es kann.
+7. **`refineLandmark`** (Option „Wahrzeichen genau platzieren“, höchstens 6): Wahrzeichen mit Foto und Grundriss bekommen ihr Foto nicht im ersten Durchgang (dort nur schlichtes Gebäude, Bildnummern der übrigen Fotos rücken nach), sondern danach einzeln: quadratischer Ausschnitt um den Grundriss (3 × Grundriss, 20–50 % der Kartenbreite, etwas nach oben versetzt für Türme), Grundriss magenta umrandet, `stylizeCanvas` in 1K mit nur diesem Foto, Rückweg mit 6 % weichem Rand (`filter: blur` als Maske). Danach folgt erst die Beschriftung bzw. der Quellenhinweis mit allen Fotos.
+8. **Nachbearbeitung**: „aus einem Guss“ nur `drawCredits`, „exakt“ Straßennamen darüberlegen und `drawIlluOverlay` (Nummern mit Ausweichlogik neben den Orten bzw. knapp außerhalb des Grundrisses, nie auf einem anderen Grundriss, Seitenleiste, Quellen).
 
-**Warum die Namen nicht im Prompt stehen:** Im ersten Test hat Gemini die Namen trotz Textverbot ins Bild geschrieben, teils verfälscht. Ohne Namen bleibt die Karte textfrei, und die App setzt die echten Namen scharf in die Legende.
+**Was die Tests im Browser gezeigt haben** (Deventer, Altstadt):
+
+- Stehen die POI-Namen im Prompt, schreibt Gemini sie trotz Textverbot ins Bild. Im Modus „exakt“ bekommt es deshalb nur Typen.
+- Nano Banana 2 hält sich in 2K eng an die Vorlage und übernimmt rote Markierungspunkte als Bildinhalt. Im Modus „aus einem Guss“ dienen deshalb die Nummern als Anker.
+- Mit Ortsangabe zeichnet Gemini die örtliche Bauweise (Backstein, Ziegeldächer), ohne sie generische Häuser.
+- Referenzfotos verbessern die Ähnlichkeit sichtbar (Turm der Lebuinuskerk), die Lage der Zeichnung ist aber nicht immer genau.
+- Mit Grundrissen sitzen kleine Wahrzeichen (De Waag, Speelgoedmuseum) auf ihrem Platz. Die Lebuinuskerk landete trotzdem eine Kirchenlänge daneben auf dem freien Kirchhof. Ohne die Multipolygon-Prüfung war jedes Haus der Vorlage sandfarben und Gemini platzierte frei.
+- Mit dem zweiten Durchgang pro Wahrzeichen deckten sich alle Grundrisse aus der Vorlage mit den Zeichnungen (geprüft durch Überlagern), Lebuinuskerk und EICAS eingeschlossen. Die Nahtstellen sind nicht zu sehen. Zwei Wahrzeichen kosteten etwa 25 Sekunden zusätzlich.
+- Im Modus „aus einem Guss“ sind einzelne Fehler möglich: eine Nummer doppelt, Gewässernamen zusammengezogen.
 
 ## Entscheidungen
 
@@ -143,7 +161,10 @@ collectPois ─▶ renderTemplate ─▶ composeIlluPrompt ─▶ stylizeCanvas 
 | Chat | weiter Claude über das Anthropic-SDK | Werkzeugaufrufe und Regeltreue laufen stabil, Umbau nicht nötig |
 | Basiskarte | OpenFreeMap statt CARTO | CARTO liefert ohne Schlüssel nur noch Kacheln mit Wasserzeichen |
 | Export | höhere Pixeldichte statt Bildschirmfoto | Bildschirmauflösung ergab für A3 nur rund 1260 px Breite |
-| Beschriftung bei Bildmodellen | App setzt Text, Modell zeichnet ohne Text | Bildmodelle verfälschen Namen und Nummern |
+| Beschriftung bei Bildmodellen | Zwei Modi: „aus einem Guss“ (Gemini letert alles) und „exakt“ (App setzt Text) | Gezeichnete Schrift wirkt einheitlich, ist aber fehleranfällig; die Wahl hängt vom Zweck ab |
+| Quellenhinweis | immer von der App | Muss buchstabengenau stimmen (OSM, Lizenzen der Fotos) |
+| Referenzfotos | Server lädt sie und schickt Data-URLs | Wikimedia verlangt einen User-Agent; ob OpenRouter oder Google die URLs abrufen dürfen, ist unsicher |
+| Fähigkeiten des Bildmodells | live von OpenRouter (`/api/v1/images/models`) | Grenzen wie die Zahl der Eingabebilder unterscheiden sich je Modell (3 bis 14) |
 
 ## Tests
 
@@ -158,7 +179,8 @@ npm test
 - `style_layer`, `remove_layer` und Fehler bei unbekannten Ebenen,
 - die Tag-Prüfung gegen Query-Injection,
 - die Agent-Schleife mit Werkzeugaufruf über HTTP,
-- Fehlermeldungen ohne Schlüssel und das Stylisieren inklusive Request an OpenRouter.
+- Fehlermeldungen ohne Schlüssel und das Stylisieren inklusive Request an OpenRouter (Referenzbilder, Auflösung, Seitenverhältnis),
+- Referenzfotos: Wikidata → Commons mit Urheber und Lizenz, Wikidata-IDs aus OSM.
 
 Die Bildverarbeitung im Browser (Export, Auffüllen, Zuschneiden, illustrierte Stadtkarte) hat keine automatischen Tests. Sie wurde von Hand im Browser geprüft.
 
@@ -170,6 +192,7 @@ Die Bildverarbeitung im Browser (Export, Auffüllen, Zuschneiden, illustrierte S
 | Neues Werkzeug für den Chat | Definition in `toolDefinitions` und Fall in `runTool` (`lib/tools.js`), bei Bedarf Hinweis im Systemprompt (`server.js`) |
 | Neue Stilvorlage zum Umstylen | `PRESETS` in `public/app.js` |
 | Neue Stilvorlage für die Stadtkarte | `ILLU_PRESETS` in `public/app.js` |
+| Weitere Gebäudetypen für Referenzfotos | `REF_TYPES` in `public/app.js` |
 | Anderes Bildmodell | `OPENROUTER_IMAGE_MODEL` in `.env`. Liefert es andere Formate als Gemini, `IMAGE_RATIOS` anpassen. |
 | Höhere Exportauflösung | `EXPORT_DPI`, `MAX_CANVAS` und `maxCanvasSize` in `public/app.js` |
 

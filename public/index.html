@@ -105,14 +105,23 @@
 
       <div id="st-illu" hidden>
         <h2>Illustrierte Stadtkarte</h2>
-        <p class="hint">Zeichnet den Ausschnitt als illustrierte Karte. Straßen, Wasser und Grün kommen aus OSM, benannte Punkte aus deinen Ebenen werden zu kleinen Zeichnungen. Nummern, Legende und Titel setzt die App danach selbst, damit die Namen stimmen.</p>
+        <p class="hint">Zeichnet den Ausschnitt als illustrierte Karte. Straßen, Wasser und Grün kommen aus OSM, benannte Punkte aus deinen Ebenen werden zu kleinen Zeichnungen. Die Schrift zeichnet Gemini mit („aus einem Guss“), oder die App setzt sie danach exakt ein.</p>
         <label>Titel <input id="il-title" type="text" placeholder="z. B. Deventer – Altstadt"></label>
+        <label title="Damit Gemini die echte örtliche Bauweise zeichnet">Ort <input id="il-place" type="text" placeholder="z. B. Altstadt von Deventer, Niederlande"></label>
         <label>Stil-Vorlage <select id="il-preset"></select></label>
         <label>Stil <textarea id="il-style" rows="3"></textarea></label>
         <div class="checks">
           <label><input type="checkbox" id="il-labels" checked> Nummern und Legende</label>
           <label title="Fotos der Wahrzeichen aus Wikidata/Wikimedia Commons als Vorlage mitschicken"><input type="checkbox" id="il-refs" checked> Referenzfotos (Wikidata)</label>
+          <label title="Straßen- und Gewässernamen aus OpenStreetMap"><input type="checkbox" id="il-streets" checked> Straßennamen</label>
+          <label title="Wahrzeichen mit Foto und Grundriss danach einzeln an ihrer echten Stelle nachzeichnen (je Wahrzeichen ein weiterer Gemini-Aufruf, höchstens 6)"><input type="checkbox" id="il-refine" checked> Wahrzeichen genau platzieren</label>
         </div>
+        <label>Beschriftung
+          <select id="il-lettering">
+            <option value="gemini">aus einem Guss (Gemini zeichnet alle Schrift, Fehler möglich)</option>
+            <option value="app">exakt (App setzt die Schrift danach ein)</option>
+          </select>
+        </label>
         <div id="il-pois" class="poi-list"></div>
         <div class="btns">
           <button id="il-run" class="primary">Stadtkarte zeichnen</button>

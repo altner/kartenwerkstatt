@@ -136,7 +136,7 @@ map.on('click', (e) => {
   const hit = ids.length ? map.queryRenderedFeatures(e.point, { layers: ids }) : [];
   if (hit.length) {
     const p = hit[0].properties;
-    const rows = Object.entries(p).filter(([k, v]) => v !== '' && v != null && k !== 'osm_id')
+    const rows = Object.entries(p).filter(([k, v]) => v !== '' && v != null && k !== 'osm_id' && k !== 'footprint')
       .map(([k, v]) => `${esc(k)}: ${esc(v)}`).join('<br>');
     popup.setLngLat(e.lngLat).setHTML(`<b>${esc(p.name || p.subtype || 'Objekt')}</b>${rows}`).addTo(map);
     return;
@@ -224,7 +224,7 @@ function bboxOf(fc) {
 // ------------------------------------------------------------------ Tabelle
 function showTable(l) {
   const feats = l.geojson.features;
-  const cols = [...new Set(feats.flatMap((f) => Object.keys(f.properties || {})))];
+  const cols = [...new Set(feats.flatMap((f) => Object.keys(f.properties || {})))].filter((k) => k !== 'footprint');
   $('#table-title').textContent = l.name;
   $('#table-info').textContent = `${feats.length} Objekte` + (feats.length > 1000 ? ' (Anzeige: erste 1000)' : '');
   const rows = feats.slice(0, 1000).map((f) => `<tr>${cols.map((c) => `<td>${esc(f.properties?.[c])}</td>`).join('')}</tr>`).join('');
@@ -563,10 +563,10 @@ async function cropResult(dataUrl, crop, aspect) {
 }
 
 // Bild an das Bildmodell schicken (mit Rand auf ein Gemini-Format gebracht) und auf den Ausschnitt zurückschneiden
-async function stylizeCanvas(canvas, prompt, references = []) {
+async function stylizeCanvas(canvas, prompt, references = [], resolution) {
   const p = padToRatio(canvas);
   if (p.crop.w < 0.995 || p.crop.h < 0.995) prompt += '\n\nThe input has plain white margins around the map. Keep the map exactly in place and at the same size, and leave the margins plain white.';
-  const r = await fetch('/api/stylize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: p.canvas.toDataURL('image/png'), prompt, aspect_ratio: p.ratio, references }) });
+  const r = await fetch('/api/stylize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: p.canvas.toDataURL('image/png'), prompt, aspect_ratio: p.ratio, references, resolution }) });
   const data = await r.json();
   if (!r.ok) throw new Error(data.error || r.statusText);
   return { canvas: await cropResult(data.image, p.crop, p.aspect), model: data.model };
@@ -605,6 +605,40 @@ $('#il-preset').addEventListener('change', (e) => { $('#il-style').value = ILLU_
 
 const MAX_POIS = 30;
 // Benannte Punkte aus sichtbaren Ebenen im Ausschnitt, Lage relativ zum Ausschnitt (0..1), in Lesereihenfolge nummeriert
+// Grundriss eines Orts in Ausschnitt-Koordinaten (0..1): aus OSM (properties.footprint) oder, für Gebäude-Typen,
+// aus dem Gebäude der Vektorkarte, in dem der Punkt liegt. So weiß Gemini, wo und wie groß das Wahrzeichen ist.
+function poiFootprint(f, pt, r) {
+  let geom = f.properties.footprint;
+  if (typeof geom === 'string') { try { geom = JSON.parse(geom); } catch { geom = null; } }
+  if (!geom && REF_TYPES.includes(f.properties.subtype)) {
+    const ids = basemapIds.layers.filter((id) => map.getLayer(id)?.sourceLayer === 'building' && map.getLayoutProperty(id, 'visibility') !== 'none');
+    const hit = ids.length ? map.queryRenderedFeatures([[pt.x - 2, pt.y - 2], [pt.x + 2, pt.y + 2]], { layers: ids }) : [];
+    geom = hit.find((h) => /Polygon/.test(h.geometry.type))?.geometry || null;
+  }
+  if (!geom) return null;
+  let polys = (geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates)
+    .map((rings) => rings.map((ring) => ring.map((c) => { const q = map.project(c); return [(q.x - r.x) / r.w, (q.y - r.y) / r.h]; })));
+  // Die Vektorkarte fasst oft viele Häuser zu einem Multipolygon zusammen: nur das Gebäude nehmen, in dem der Punkt liegt.
+  if (!f.properties.footprint) {
+    const px = (pt.x - r.x) / r.w; const py = (pt.y - r.y) / r.h;
+    polys = polys.filter((rings) => insideRing(px, py, rings[0])).slice(0, 1);
+  }
+  if (!polys.length) return null;
+  const xs = polys.flat(2).map((c) => c[0]); const ys = polys.flat(2).map((c) => c[1]);
+  const fp = { polys, x1: Math.min(...xs), x2: Math.max(...xs), y1: Math.min(...ys), y2: Math.max(...ys) };
+  // Unplausibel große Umrisse (Gelände, Häuserblöcke) helfen Gemini nicht weiter
+  return fp.x2 - fp.x1 > 0.3 || fp.y2 - fp.y1 > 0.3 ? null : fp;
+}
+
+function insideRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]; const [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
 function collectPois() {
   const r = frameRect(); const seen = new Set(); const pois = [];
   for (const l of state.layers.values()) {
@@ -616,15 +650,25 @@ function collectPois() {
       const fx = (pt.x - r.x) / r.w; const fy = (pt.y - r.y) / r.h;
       if (fx < 0.03 || fx > 0.97 || fy < 0.03 || fy > 0.97) continue;
       seen.add(name.toLowerCase());
-      pois.push({ name, type: f.properties.subtype || '', wikidata: f.properties.wikidata || null, fx, fy });
+      pois.push({ name, type: f.properties.subtype || '', wikidata: f.properties.wikidata || null, fx, fy, fp: poiFootprint(f, pt, r) });
     }
   }
   pois.sort((a, b) => Math.floor(a.fy * 6) - Math.floor(b.fy * 6) || a.fx - b.fx);
   return pois.slice(0, MAX_POIS).map((p, i) => ({ ...p, n: i + 1 }));
 }
 
+// Ort für den Prompt (damit Gemini die echte örtliche Bauweise kennt), vorbelegt aus dem Standort des Chats
+function suggestPlace() {
+  for (const l of state.layers.values()) {
+    const f = l.geojson.features.find((x) => x.properties?.subtype === 'Standort' && x.properties.name);
+    if (f) return f.properties.name;
+  }
+  return '';
+}
+
 function updatePoiList() {
   if ($('#st-illu').hidden) return;
+  if (!$('#il-place').value.trim()) $('#il-place').value = suggestPlace();
   const pois = collectPois();
   $('#il-pois').innerHTML = pois.length
     ? `<strong>${pois.length} Orte im Ausschnitt</strong>${pois.length === MAX_POIS ? ' <span class="muted">(max.)</span>' : ''}<ol>${pois.map((p) => `<li>${esc(p.name)}${p.type ? ` <span class="muted">· ${esc(p.type)}</span>` : ''}${p.wikidata && REF_TYPES.includes(p.type) ? ' <span class="muted" title="Wikidata-Eintrag vorhanden">· Wikidata</span>' : ''}</li>`).join('')}</ol>`
@@ -640,26 +684,54 @@ $('#st-mode').addEventListener('click', (e) => {
   updatePoiList();
 });
 
-// Zeichenvorlage: Vektor-Basiskarte ohne Beschriftungen, ohne Analyse-Ebenen, POIs als rote Punkte
-async function renderTemplate(pois) {
-  const prev = currentBasemap; const hidden = [];
-  const hide = (id) => { if (map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== 'none') { map.setLayoutProperty(id, 'visibility', 'none'); hidden.push(id); } };
-  let c;
+// Ausschnitt der Vektor-Basiskarte rendern, nur mit den Ebenen, für die keep(layer) gilt (alle anderen kurz ausgeblendet,
+// optional mit geänderten Textfarben). Ist gerade keine Vektorkarte aktiv, wird kurz auf „Hell“ umgeschaltet.
+async function grabVectorFrame(targetWidth, keep, textPaint = {}) {
+  const prev = currentBasemap; const hidden = []; const painted = [];
   try {
     if (!BASEMAPS[prev]?.style) await setBasemap('light');
-    for (const id of basemapIds.layers) if (map.getLayer(id)?.type === 'symbol') hide(id);
-    for (const id of state.layers.keys()) for (const k of ['fill', 'line', 'circle']) hide(`${id}-${k}`);
-    c = downscale(await grabFrame(2048));
+    const appIds = [...state.layers.keys()].flatMap((id) => ['fill', 'line', 'circle'].map((k) => `${id}-${k}`));
+    for (const id of ['bg', ...basemapIds.layers, ...appIds]) {
+      const l = map.getLayer(id);
+      if (!l) continue;
+      if (!keep(l)) {
+        if (map.getLayoutProperty(id, 'visibility') !== 'none') { map.setLayoutProperty(id, 'visibility', 'none'); hidden.push(id); }
+      } else if (l.type === 'symbol') {
+        for (const [k, v] of Object.entries(textPaint)) { painted.push([id, k, map.getPaintProperty(id, k)]); map.setPaintProperty(id, k, v); }
+      }
+    }
+    return await grabFrame(targetWidth);
   } finally {
+    for (const [id, k, v] of painted) if (map.getLayer(id)) map.setPaintProperty(id, k, v);
     for (const id of hidden) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
     if (currentBasemap !== prev) await setBasemap(prev);
   }
-  const g = c.getContext('2d'); const rad = c.width * 0.007;
-  for (const p of pois) {
+}
+
+// Zeichenvorlage: Vektor-Basiskarte ohne Beschriftungen (außer auf Wunsch Straßen-/Gewässernamen für Gemini),
+// ohne Analyse-Ebenen, POIs als rote Punkte
+async function renderTemplate(pois, withNames = false, dots = true) {
+  const c = downscale(await grabVectorFrame(2048, (l) => l.id === 'bg' || (l.id.startsWith('bm-') && (l.type !== 'symbol' || (withNames && isNameLayer(l))))));
+  const g = c.getContext('2d'); const rad = c.width * 0.005;
+  // Grundrisse der Wahrzeichen hervorheben (sandfarben mit brauner Kontur): echte Lage, Größe und Ausrichtung
+  for (const p of pois.filter((x) => x.fp)) {
+    g.beginPath();
+    for (const rings of p.fp.polys) for (const ring of rings) ring.forEach(([x, y], i) => (i ? g.lineTo(x * c.width, y * c.height) : g.moveTo(x * c.width, y * c.height)));
+    g.fillStyle = '#d9b48f'; g.fill('evenodd'); g.lineWidth = Math.max(1.5, c.width / 900); g.strokeStyle = '#7a4a2a'; g.stroke();
+  }
+  for (const p of dots ? pois.filter((x) => !x.fp) : []) {
     g.beginPath(); g.arc(p.fx * c.width, p.fy * c.height, rad, 0, 7);
     g.fillStyle = '#e11d48'; g.fill(); g.lineWidth = rad * 0.35; g.strokeStyle = '#ffffff'; g.stroke();
   }
   return c;
+}
+
+// Straßen- und Gewässernamen aus der Vektorkarte, deckungsgleich zum Ausschnitt, auf transparentem Grund.
+// Sie kommen nachträglich über die Zeichnung, weil Bildmodelle Namen verfälschen.
+const isNameLayer = (l) => l.type === 'symbol' && l.id.startsWith('bm-') && !/shield/.test(l.id)
+  && ['transportation_name', 'water_name', 'waterway'].includes(l.sourceLayer);
+function renderNameLabels(width) {
+  return grabVectorFrame(width, isNameLayer, { 'text-color': '#4a2f1a', 'text-halo-color': 'rgba(251,246,236,0.9)', 'text-halo-width': 1.6 });
 }
 
 // Gebäude-Typen, für die ein Referenzfoto hilft (Statuen, Gedenktafeln usw. nicht), in Reihenfolge der Wichtigkeit
@@ -680,29 +752,50 @@ async function loadReferences(pois) {
     .slice(0, max).map((p, i) => ({ poi: p, index: i + 2, ...data.references[p.wikidata] }));
 }
 
-// Namen stehen bewusst nicht im Prompt: Sonst schreibt das Modell sie (oft fehlerhaft) ins Bild
-function composeIlluPrompt(pois, refs = []) {
-  const where = (p) => `${Math.round(p.fx * 100)}% from the left, ${Math.round(p.fy * 100)}% from the top`;
+// Zwei Beschriftungsarten:
+//  - text: false → Gemini zeichnet ohne Text, die App setzt Nummern, Legende und Straßennamen danach exakt darüber.
+//  - text: true  → „aus einem Guss“: Straßennamen, Nummern, Titel und Legende stehen schon in der Vorlage,
+//    Gemini zeichnet sie im Kartenstil nach (schöner, aber Schreibfehler möglich).
+// Im Modus ohne Text stehen die POI-Namen bewusst nicht im Prompt, sonst schreibt das Modell sie ins Bild.
+function composeIlluPrompt(pois, refs = [], { text = false, names = false, panel = false, mapFrac = 1, place = '', numbered = false } = {}) {
+  const where = (p) => `${Math.round(p.fx * mapFrac * 100)}% from the left, ${Math.round(p.fy * 100)}% from the top`;
   const refOf = new Map(refs.map((r) => [r.poi, r]));
-  return [
-    'Important: the image must contain no text at all.',
-    `Turn this street map template into a beautiful illustrated city map in the style of ${$('#il-style').value.trim()}.`,
+  const parts = [
+    text
+      ? 'Important: the only text allowed in the image is the text that is already written in the template, copied letter by letter. Do not add, translate or invent any words.'
+      : 'Important: the image must contain no text at all.',
+    `Turn this ${panel ? 'map sheet' : 'street map template'} into a beautiful illustrated city map in the style of ${$('#il-style').value.trim()}.`,
     'Keep the street network, rivers, water, parks and the overall shape of the city exactly as in the template, at the same positions and scale, so the map stays geographically recognisable. Draw main streets wider than side streets, built-up blocks as small illustrated houses and roofs, trees in parks and gentle texture on water.',
-    refs.length ? `Image 1 is the map template. Images 2 to ${refs.length + 1} are reference photos of real landmarks on this map. Use each photo only so that the small illustration of that landmark resembles the real building (silhouette, towers, roof shapes, materials, colours). Do not paste the photos, their perspective or their backgrounds into the map, and draw everything in the illustration style of the map.` : '',
-    pois.length ? `The red dots mark points of interest. At each red dot draw a small illustration of what is there (a characteristic building or pictogram), centred on the dot, and do not keep the red dot itself:\n${pois.map((p) => `- ${p.type || 'point of interest'} at ${where(p)}${refOf.has(p) ? ` (looks like the building in image ${refOf.get(p).index})` : ''}`).join('\n')}` : '',
-    'Do not write any text anywhere in the image: no letters, numbers, street names, labels, title, legend, compass or frame. Labels will be added afterwards.',
-  ].filter(Boolean).join('\n\n');
+  ];
+  if (place) parts.push(`This map shows ${place}. Draw the houses, roofs and landmarks in the authentic local architecture of this place as it really looks (typical building types, gables, roof shapes, materials and colours), using your knowledge of the place. Do not fall back on a generic or European style unless that is how this place really looks.${refs.length ? ' Landmarks that have a reference photo must follow their photo, even if their style differs from the surroundings.' : ''}`);
+  if (panel) parts.push('The template is a complete map sheet: the map on the left and a legend panel on the right. Redraw the panel as a matching decorative cartouche on paper, at the same position and size, with the same title and the same numbered list of places in the same order.');
+  if (refs.length) parts.push(`Image 1 is the template. Images 2 to ${refs.length + 1} are reference photos of real landmarks on this map. Use each photo only so that the small illustration of that landmark resembles the real building (silhouette, towers, roof shapes, materials, colours). Do not paste the photos, their perspective or their backgrounds into the map, and draw everything in the illustration style of the map.`);
+  const pct = (v, f = 1) => Math.round(v * f * 100);
+  const fpText = (p) => `standing exactly on the highlighted footprint from ${pct(p.fp.x1, mapFrac)}% to ${pct(p.fp.x2, mapFrac)}% from the left and ${pct(p.fp.y1)}% to ${pct(p.fp.y2)}% from the top`;
+  const listing = pois.map((p) => `- ${numbered ? `number ${p.n}: ` : ''}${p.type || 'point of interest'} ${p.fp ? fpText(p) : `at ${where(p)}`}${refOf.has(p) ? ` (looks like the building in image ${refOf.get(p).index})` : ''}`).join('\n');
+  if (pois.some((p) => p.fp)) parts.push('Landmark buildings are marked in the template as highlighted footprints (sand-coloured fill with a brown outline) at their exact real position, size and orientation. Draw each landmark as an illustrated building standing exactly on its footprint and covering it, with the same outline and orientation. Do not move landmarks, do not make them much bigger than their footprint, and do not draw any landmark anywhere else. After drawing, no sand-coloured footprint may remain visible.');
+  if (pois.length && numbered) parts.push(`The small numbers on the map belong to points of interest. Draw each place where described below; for places without a footprint draw a small illustration or pictogram right beside the number, without covering the number:\n${listing}`);
+  else if (pois.length) parts.push(`Draw each point of interest where described below. Places without a footprint are marked by a red dot: draw a small illustration or pictogram centred on the dot and covering it completely:\n${listing}`);
+  if (text) {
+    if (numbered) parts.push('The numbers on the map refer to the numbered list in the legend. Redraw every number exactly once at the same spot, small and clearly legible, in the lettering style of the map, without circles or markers. Never repeat a number anywhere else on the map. Keep the legend list complete: every number from 1 to ' + pois.length + ' in order, each with its name exactly as written.');
+    if (names) parts.push('Redraw the street and water names at the same places and along the same streets as elegant hand lettering that matches the illustration style.');
+  } else {
+    parts.push('Do not write any text anywhere in the image: no letters, numbers, street names, labels, title, legend, compass or frame. Labels will be added afterwards.');
+  }
+  if (pois.length && !numbered) parts.push('The red dots are only placement markers: the finished image must not contain any red dots or markers.');
+  return parts.join('\n\n');
 }
 
 // Nummern an die Orte setzen; Titel, Legende und Quellen kommen in eine Seitenleiste, damit die Karte frei bleibt.
 // Liefert ein neues, breiteres Canvas.
-function drawIlluOverlay(map_, pois, title, labels, refs = []) {
+function drawIlluOverlay(map_, pois, title, labels, refs = [], { credit: withCredit = true } = {}) {
   const u = map_.width / 1200; const pad = 22 * u;
   const font = (px, w = 400) => `${w} ${Math.round(px * u)}px Georgia, "Times New Roman", serif`;
   const ink = '#3b2412'; const paper = '#fbf6ec';
   const list = labels ? pois : [];
   const rowH = 22 * u; const headH = (title ? 64 : 0) * u + (list.length ? 34 : 0) * u;
-  const maxRows = Math.max(4, Math.floor((map_.height - headH - 3 * pad) / rowH));
+  // unten Platz für den Quellenhinweis lassen (Gemini zeichnet die Legende oft etwas größer)
+  const maxRows = Math.max(4, Math.floor((map_.height - headH - 3 * pad - 80 * u) / rowH));
   const cols = Math.max(1, Math.ceil(list.length / maxRows)); const rows = Math.ceil(list.length / cols);
   const m = document.createElement('canvas').getContext('2d');
   m.font = font(14);
@@ -715,12 +808,36 @@ function drawIlluOverlay(map_, pois, title, labels, refs = []) {
   c.width = map_.width + side; c.height = map_.height;
   const g = c.getContext('2d');
   g.drawImage(map_, 0, 0);
-  const badge = (x, y, n, r = 11 * u) => {
-    g.beginPath(); g.arc(x, y, r, 0, 7); g.fillStyle = '#7c2d12'; g.fill(); g.lineWidth = 2 * u; g.strokeStyle = '#fffaf0'; g.stroke();
-    g.fillStyle = '#fffaf0'; g.font = font(n > 9 ? 11 : 12, 700); g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(n), x, y + 0.5 * u);
+  // Nur die Zahl, mit hellem Schein für die Lesbarkeit – keine Markierung auf der Zeichnung
+  const number = (x, y, n, size = 15) => {
+    g.font = font(size, 700); g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.lineJoin = 'round'; g.lineWidth = 4 * u; g.strokeStyle = 'rgba(255,250,240,0.95)'; g.strokeText(String(n), x, y);
+    g.fillStyle = '#7c2d12'; g.fillText(String(n), x, y);
   };
-  // Nummer etwas rechts oberhalb, damit die Zeichnung sichtbar bleibt
-  for (const p of list) badge(p.fx * map_.width + 16 * u, p.fy * map_.height - 16 * u, p.n);
+  // Nummern neben die Orte setzen, damit sie die Zeichnungen nicht verdecken.
+  // Je Ort die Richtung wählen, die am weitesten von anderen Orten und schon gesetzten Nummern entfernt ist.
+  // Bei Wahrzeichen mit Grundriss kommt die Nummer knapp außerhalb des Grundrisses, nie auf einen anderen Grundriss.
+  const W = map_.width; const H = map_.height;
+  const pts = list.map((p) => (p.fp
+    ? { x: ((p.fp.x1 + p.fp.x2) / 2) * W, y: ((p.fp.y1 + p.fp.y2) / 2) * H, hw: ((p.fp.x2 - p.fp.x1) / 2) * W, hh: ((p.fp.y2 - p.fp.y1) / 2) * H }
+    : { x: p.fx * W, y: p.fy * H, hw: 10 * u, hh: 10 * u }));
+  const boxes = list.filter((p) => p.fp).map((p) => ({ p, x1: p.fp.x1 * W, x2: p.fp.x2 * W, y1: p.fp.y1 * H, y2: p.fp.y2 * H }));
+  const placed = []; const gap = 16 * u; const keepOff = 18 * u;
+  list.forEach((p, i) => {
+    const o = pts[i];
+    let best = null;
+    for (let k = 0; k < 8; k++) {
+      const a = -Math.PI / 4 + (k * Math.PI) / 4; // zuerst rechts oben
+      const x = o.x + Math.cos(a) * (o.hw + gap); const y = o.y - Math.sin(a) * (o.hh + gap);
+      if (x < 14 * u || y < 14 * u || x > W - 14 * u || y > H - 14 * u) continue;
+      if (boxes.some((b) => x > b.x1 - 6 * u && x < b.x2 + 6 * u && y > b.y1 - 6 * u && y < b.y2 + 6 * u)) continue;
+      const near = Math.min(Infinity, ...pts.filter((_, j) => j !== i).map((q) => Math.hypot(q.x - x, q.y - y)), ...placed.map((q) => Math.hypot(q.x - x, q.y - y) - keepOff));
+      if (!best || near > best.near) best = { x, y, near };
+    }
+    best ||= { x: o.x, y: o.y - o.hh - gap };
+    placed.push(best);
+    number(best.x, best.y, p.n);
+  });
 
   if (side) {
     const x0 = map_.width;
@@ -737,32 +854,90 @@ function drawIlluOverlay(map_, pois, title, labels, refs = []) {
       g.font = font(15, 700); g.fillText('Orte', x0 + pad, y + 10 * u); y += 34 * u;
       list.forEach((p, i) => {
         const cx = x0 + pad + Math.floor(i / rows) * colW; const cy = y + (i % rows) * rowH + rowH / 2;
-        badge(cx + 9 * u, cy, p.n, 9 * u);
-        g.fillStyle = ink; g.font = font(14); g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(p.name, cx + 24 * u, cy);
+        g.fillStyle = '#7c2d12'; g.font = font(14, 700); g.textAlign = 'right'; g.textBaseline = 'middle'; g.fillText(String(p.n), cx + 18 * u, cy);
+        g.fillStyle = ink; g.font = font(14); g.textAlign = 'left'; g.fillText(p.name, cx + 26 * u, cy);
       });
     }
   }
+  c.mapFrac = map_.width / c.width;
+  if (withCredit) drawCredits(c, refs, c.mapFrac);
+  return c;
+}
+
+// Quellenhinweis (OSM, KI, Fotovorlagen mit Urheber und Lizenz). Er muss buchstabengenau stimmen und kommt deshalb
+// immer von der App, auch im Modus „aus einem Guss“. Mit Seitenleiste dort umbrochen, sonst unten rechts.
+function drawCredits(c, refs, mapFrac = 1) {
+  const g = c.getContext('2d'); const u = c.width * mapFrac / 1200; const pad = 22 * u;
   let credit = 'Kartendaten © OpenStreetMap-Mitwirkende · Illustration: KI (Gemini)';
   if (refs.length) credit += ` · Fotovorlagen von Wikimedia Commons: ${refs.map((r) => `${r.artist} (${r.license})`).join('; ')}`;
-  g.font = font(10); g.fillStyle = ink; g.globalAlpha = 0.75; g.textBaseline = 'alphabetic';
-  if (side) {
-    // Quellen in der Seitenleiste von unten nach oben umbrechen
-    const maxW = side - 2 * pad; const lines = [];
+  g.font = `400 ${Math.round(10 * u)}px Georgia, "Times New Roman", serif`; g.fillStyle = '#3b2412'; g.textBaseline = 'alphabetic';
+  if (mapFrac < 1) {
+    const x0 = c.width * mapFrac + pad; const maxW = c.width - x0 - pad; const lines = [];
     for (const word of credit.split(' ')) {
       const last = lines[lines.length - 1];
       if (last !== undefined && g.measureText(`${last} ${word}`).width <= maxW) lines[lines.length - 1] = `${last} ${word}`; else lines.push(word);
     }
-    g.textAlign = 'left';
-    lines.forEach((l, i) => g.fillText(l, map_.width + pad, c.height - 8 * u - (lines.length - 1 - i) * 13 * u));
+    const lh = 13 * u; const top = c.height - 8 * u - (lines.length - 1) * lh - 11 * u;
+    g.fillStyle = 'rgba(251,246,236,0.85)'; g.fillRect(x0 - 6 * u, top, maxW + 12 * u, lines.length * lh + 8 * u);
+    g.fillStyle = '#3b2412'; g.textAlign = 'left';
+    lines.forEach((l, i) => g.fillText(l, x0, c.height - 8 * u - (lines.length - 1 - i) * lh));
   } else {
-    g.textAlign = 'right'; g.fillText(credit, c.width - 6 * u, c.height - 8 * u);
+    const w = g.measureText(credit).width + 12 * u;
+    g.fillStyle = 'rgba(251,246,236,0.85)'; g.fillRect(c.width - w, c.height - 16 * u, w, 16 * u);
+    g.fillStyle = '#3b2412'; g.textAlign = 'right'; g.fillText(credit, c.width - 6 * u, c.height - 5 * u);
   }
-  g.globalAlpha = 1;
-  return c;
+}
+
+// Vorlage für den gewählten Modus: im Modus „aus einem Guss“ mit Straßennamen, Nummern und Legende
+async function buildIlluInput(pois, refs) {
+  const text = $('#il-lettering').value === 'gemini';
+  const names = $('#il-streets').checked; const labels = $('#il-labels').checked; const title = $('#il-title').value.trim();
+  // Im Modus „aus einem Guss“ mit Nummern dienen die Nummern als Anker; rote Punkte würde das Modell sonst übernehmen
+  const numbered = text && labels && pois.length > 0;
+  let tpl = await renderTemplate(pois, text && names, !numbered);
+  let mapFrac = 1;
+  if (text && (labels || title)) { tpl = drawIlluOverlay(tpl, pois, title, labels, [], { credit: false }); mapFrac = tpl.mapFrac; }
+  const prompt = composeIlluPrompt(pois, refs, { text, names, panel: mapFrac < 1, mapFrac, place: $('#il-place').value.trim(), numbered });
+  return { tpl, prompt, text, names, labels, title, mapFrac };
+}
+
+// Zweiter Durchgang: Wahrzeichen mit Foto und Grundriss einzeln in ihrem Bildausschnitt nachzeichnen. Gemini sieht dort
+// nur die Umgebung des Grundrisses und kann das Gebäude kaum verschieben; der Ausschnitt kommt mit weichem Rand zurück.
+const MAX_REFINE = 6;
+const refinePrompt = (p) => [
+  'Image 1 is a small part of an illustrated city map. The bright magenta outline marks the exact ground plan of a real landmark'
+    + `${p.type ? ` (${p.type})` : ''}. Draw this landmark standing exactly on the magenta outline: its walls follow the outline, with the same orientation and size, seen from the same angle and in exactly the same illustration style, line work, colours and scale as the surrounding buildings.`,
+  'Image 2 is a photo of the real building. Make the drawing resemble it (silhouette, towers, roof shapes, materials, colours), but do not copy the photo, its perspective or its background.',
+  'Remove the magenta outline completely. If this landmark is already drawn somewhere else in this image, replace that copy with ordinary buildings or open space that match the surroundings.',
+  'Keep everything else exactly unchanged: streets, other buildings, trees, water and all numbers and lettering, at the same positions, size and colours. Do not add any text.',
+].join('\n\n');
+
+async function refineLandmark(out, ref, mapFrac) {
+  const fp = ref.poi.fp; const mapW = out.width * mapFrac; const H = out.height;
+  const fw = (fp.x2 - fp.x1) * mapW; const fh = (fp.y2 - fp.y1) * H;
+  // Quadrat um den Grundriss, groß genug für Umgebung und eine danebengerutschte Kopie aus dem ersten Durchgang
+  const size = Math.round(Math.min(Math.max(Math.max(fw, fh) * 3, mapW * 0.2), mapW * 0.5, H));
+  const cx = ((fp.x1 + fp.x2) / 2) * mapW; const cy = ((fp.y1 + fp.y2) / 2) * H - fh * 0.3; // etwas Luft nach oben für Türme
+  const x0 = Math.round(Math.min(Math.max(cx - size / 2, 0), mapW - size));
+  const y0 = Math.round(Math.min(Math.max(cy - size / 2, 0), H - size));
+  const crop = document.createElement('canvas'); crop.width = size; crop.height = size;
+  const g = crop.getContext('2d');
+  g.drawImage(out, x0, y0, size, size, 0, 0, size, size);
+  g.beginPath();
+  for (const rings of fp.polys) for (const ring of rings) ring.forEach(([x, y], i) => (i ? g.lineTo(x * mapW - x0, y * H - y0) : g.moveTo(x * mapW - x0, y * H - y0)));
+  g.closePath(); g.lineWidth = Math.max(2, size / 200); g.strokeStyle = '#ff00ff'; g.stroke();
+  const res = await stylizeCanvas(crop, refinePrompt(ref.poi), [ref.image], state.config.resolutions?.includes('1K') ? '1K' : undefined);
+  // Mit weichem Rand zurücksetzen, damit keine Kante entsteht
+  const soft = document.createElement('canvas'); soft.width = size; soft.height = size;
+  const s = soft.getContext('2d'); const f = Math.round(size * 0.06);
+  s.filter = `blur(${Math.round(f / 2)}px)`; s.fillStyle = '#000'; s.fillRect(f, f, size - 2 * f, size - 2 * f); s.filter = 'none';
+  s.globalCompositeOperation = 'source-in'; s.drawImage(res.canvas, 0, 0, size, size);
+  out.getContext('2d').drawImage(soft, x0, y0);
 }
 
 $('#il-copy').addEventListener('click', async () => {
-  await navigator.clipboard.writeText(composeIlluPrompt(collectPois()));  // ohne Referenzfotos
+  const { prompt } = await buildIlluInput(collectPois(), []);
+  await navigator.clipboard.writeText(prompt); // ohne Referenzfotos
   $('#st-status').textContent = 'Prompt kopiert. Als Bild dazu einen Screenshot des Ausschnitts ohne Beschriftungen verwenden.';
 });
 
@@ -775,11 +950,29 @@ $('#il-run').addEventListener('click', async () => {
     if ($('#il-refs').checked) {
       status.textContent = 'Hole Referenzfotos aus Wikidata …';
       try { refs = await loadReferences(pois); } catch (err) { console.warn('Referenzfotos:', err); }
-      status.textContent = `Zeichne Stadtkarte${refs.length ? ` mit ${refs.length} Referenzfoto${refs.length > 1 ? 's' : ''}` : ''} … das kann eine halbe Minute dauern.`;
     }
-    const res = await stylizeCanvas(await renderTemplate(pois), composeIlluPrompt(pois, refs), refs.map((r) => r.image));
-    showResult(drawIlluOverlay(res.canvas, pois, $('#il-title').value.trim(), $('#il-labels').checked, refs), 'stadtkarte-illustriert.png');
-    status.textContent = `Fertig (${res.model}${refs.length ? `, ${refs.length} Referenzfoto${refs.length > 1 ? 's' : ''}` : ''}). Lage der Zeichnungen und Nummern bitte gegen die Karte prüfen.`;
+    // Wahrzeichen, die nachgezeichnet werden, bekommen ihr Foto erst im zweiten Durchgang
+    const refine = $('#il-refine').checked ? refs.filter((r) => r.poi.fp).slice(0, MAX_REFINE) : [];
+    const mainRefs = refs.filter((r) => !refine.includes(r)).map((r, i) => ({ ...r, index: i + 2 }));
+    const inp = await buildIlluInput(pois, mainRefs);
+    status.textContent = `Zeichne Stadtkarte${mainRefs.length ? ` mit ${mainRefs.length} Referenzfoto${mainRefs.length > 1 ? 's' : ''}` : ''} … das kann eine halbe Minute dauern.`;
+    // Für lesbare Schrift im Modus „aus einem Guss“ in 2K rendern, falls das Modell es kann
+    const res = await stylizeCanvas(inp.tpl, inp.prompt, mainRefs.map((r) => r.image), inp.text && state.config.resolutions?.includes('2K') ? '2K' : undefined);
+    let out = res.canvas;
+    let failed = 0;
+    for (const [i, r] of refine.entries()) {
+      status.textContent = `Zeichne Wahrzeichen ${i + 1} von ${refine.length} nach (${r.poi.name}) …`;
+      try { await refineLandmark(out, r, inp.text ? inp.mapFrac : 1); } catch (err) { failed++; console.warn('Nachzeichnen:', r.poi.name, err); }
+    }
+    if (inp.text) {
+      drawCredits(out, refs, inp.mapFrac);
+    } else {
+      if (inp.names) out.getContext('2d').drawImage(await renderNameLabels(out.width), 0, 0, out.width, out.height);
+      out = drawIlluOverlay(out, pois, inp.title, inp.labels, refs);
+    }
+    showResult(out, 'stadtkarte-illustriert.png');
+    const done = refine.length ? `, ${refine.length - failed} Wahrzeichen nachgezeichnet${failed ? `, ${failed} fehlgeschlagen` : ''}` : '';
+    status.textContent = `Fertig (${res.model}${refs.length ? `, ${refs.length} Referenzfoto${refs.length > 1 ? 's' : ''}` : ''}${done}). Lage der Zeichnungen${inp.text ? ', Nummern und Schreibweisen' : ' und Nummern'} bitte gegen die Karte prüfen.`;
   } catch (err) {
     status.textContent = `Fehler: ${err.message || err}`;
   } finally { btn.disabled = !state.config.stylize; }
